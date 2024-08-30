@@ -1,0 +1,239 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    service: ale
+  name: ale
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-agent
+  namespace: ale
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: sa-builder
+  namespace: ale
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sa-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: sa-agent
+  namespace: ale
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: agent
+    module: agent
+    service: ale
+  name: ale-agent
+  namespace: ale
+spec:
+  clusterIP: None
+  ports:
+  - appProtocol: http
+    name: http
+    port: 9800
+    protocol: TCP
+    targetPort: 9800
+  - appProtocol: https
+    name: https
+    port: 9801
+    protocol: TCP
+    targetPort: 9801
+  selector:
+    app: agent
+    module: agent
+    service: ale
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: agent
+    module: agent
+    service: ale
+  name: ale-agent-lb
+  namespace: ale
+spec:
+  allocateLoadBalancerNodePorts: true
+  externalTrafficPolicy: Local
+  internalTrafficPolicy: Cluster
+  ports:
+  - appProtocol: http
+    name: http
+    port: 80
+    protocol: TCP
+    targetPort: 9800
+  - appProtocol: https
+    name: https
+    port: 443
+    protocol: TCP
+    targetPort: 9801
+  selector:
+    app: agent
+    module: agent
+    service: ale
+  type: LoadBalancer
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: builder
+    module: docker-daemon
+    service: ale
+  name: ale-build-daemon
+  namespace: ale
+spec:
+  clusterIP: None
+  ports:
+  - port: 2376
+    protocol: TCP
+  selector:
+    app: builder
+    module: docker-daemon
+    service: ale
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: agent
+    module: agent
+    service: ale
+  name: ale-agent
+  namespace: ale
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent
+      module: agent
+      service: ale
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: agent
+        module: agent
+        service: ale
+    spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - preference:
+              matchExpressions:
+              - key: purpose
+                operator: In
+                values:
+                - system
+            weight: 1
+      containers:
+      - env:
+        - name: NODE_ENV
+          value: production
+        - name: LOG_TIMESTAMPS
+          value: "false"
+        - name: LOG_LEVEL
+          value: debug
+        image: ghcr.io/ale-run/agent:dev
+        imagePullPolicy: Always
+        livenessProbe:
+          tcpSocket:
+            port: 9800
+        name: agent
+        ports:
+        - containerPort: 9800
+        - containerPort: 9801
+        readinessProbe:
+          tcpSocket:
+            port: 9800
+        resources:
+          requests:
+            cpu: 500m
+            memory: 512Mi
+        startupProbe:
+          initialDelaySeconds: 5
+          tcpSocket:
+            port: 9800
+      serviceAccountName: sa-agent
+      terminationGracePeriodSeconds: 5
+      tolerations:
+      - effect: NoExecute
+        operator: Exists
+      - effect: NoSchedule
+        operator: Exists
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: builder
+    module: docker-daemon
+    service: ale
+  name: ale-build-daemon
+  namespace: ale
+spec:
+  minReadySeconds: 10
+  replicas: 1
+  selector:
+    matchLabels:
+      app: builder
+      module: docker-daemon
+      service: ale
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: builder
+        module: docker-daemon
+        service: ale
+    spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - preference:
+              matchExpressions:
+              - key: purpose
+                operator: In
+                values:
+                - system
+            weight: 1
+      containers:
+      - env:
+        - name: DOCKER_TLS_CERTDIR
+          value: ""
+        image: docker:20-dind
+        name: docker-dind
+        ports:
+        - containerPort: 2376
+        resources:
+          requests:
+            cpu: 100m
+            memory: 512Mi
+        securityContext:
+          privileged: true
+      serviceAccountName: sa-builder
+      terminationGracePeriodSeconds: 30
+      tolerations:
+      - effect: NoExecute
+        operator: Exists
+      - effect: NoSchedule
+        operator: Exists
