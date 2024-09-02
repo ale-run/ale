@@ -31,6 +31,16 @@ subjects:
   namespace: ale
 ---
 apiVersion: v1
+data:
+  STAT_DB_NAME: c3RhdA==
+  STAT_DB_URL: bW9uZ29kYjovLzEyNy4wLjAuMToyNzAxNy9zdGF0
+kind: Secret
+metadata:
+  name: agent-secrets
+  namespace: ale
+type: Opaque
+---
+apiVersion: v1
 kind: Service
 metadata:
   labels:
@@ -152,6 +162,16 @@ spec:
           value: "false"
         - name: LOG_LEVEL
           value: debug
+        - name: STAT_DB_URL
+          valueFrom:
+            secretKeyRef:
+              key: STAT_DB_URL
+              name: agent-secrets
+        - name: STAT_DB_NAME
+          valueFrom:
+            secretKeyRef:
+              key: STAT_DB_NAME
+              name: agent-secrets
         image: ghcr.io/ale-run/agent:dev
         imagePullPolicy: Always
         livenessProbe:
@@ -166,12 +186,39 @@ spec:
             port: 9800
         resources:
           requests:
-            cpu: 500m
-            memory: 512Mi
+            cpu: 20m
+            memory: 256Mi
         startupProbe:
           initialDelaySeconds: 5
           tcpSocket:
             port: 9800
+      - image: mongo:4.0
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          tcpSocket:
+            port: 27017
+        name: mongo
+        ports:
+        - containerPort: 27017
+          protocol: TCP
+        readinessProbe:
+          tcpSocket:
+            port: 27017
+        resources:
+          requests:
+            cpu: 20m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          privileged: false
+        startupProbe:
+          initialDelaySeconds: 5
+          tcpSocket:
+            port: 27017
+        volumeMounts:
+        - mountPath: /data/db
+          name: stat-cache-volume
+          subPath: data
       serviceAccountName: sa-agent
       terminationGracePeriodSeconds: 5
       tolerations:
@@ -179,6 +226,10 @@ spec:
         operator: Exists
       - effect: NoSchedule
         operator: Exists
+      volumes:
+      - emptyDir:
+          sizeLimit: 1Gi
+        name: stat-cache-volume
 ---
 apiVersion: apps/v1
 kind: Deployment

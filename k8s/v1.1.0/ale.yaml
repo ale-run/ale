@@ -77,7 +77,7 @@ data:
     \ sendfile on;\n  gzip on;\n\n  server {\n    index index.html;\n    root /app/html;\n\n
     \   set_real_ip_from 0.0.0.0/0;\n    real_ip_header X-Real-IP;\n    real_ip_recursive
     on;\n\n    resolver kube-dns.kube-system.svc.cluster.local valid=1s;\n    set
-    $upstream_endpoint ale-controller.ale.svc.cluster.local:9009;\n\n    location
+    $upstream_endpoint ale-controller-ops.ale.svc.cluster.local:9009;\n\n    location
     /api/ {\n      rewrite ^/api(/.*)$ $1 break;\n      \n      proxy_set_header Upgrade
     $http_upgrade;\n      proxy_set_header Connection \"upgrade\";\n      proxy_set_header
     X-Real-IP $remote_addr;\n      proxy_set_header X-Forwarded-For $remote_addr;\n
@@ -94,7 +94,16 @@ metadata:
 ---
 apiVersion: v1
 data:
-  AGENT_TOKEN: ""
+  STAT_DB_NAME: c3RhdA==
+  STAT_DB_URL: bW9uZ29kYjovLzEyNy4wLjAuMToyNzAxNy9zdGF0
+kind: Secret
+metadata:
+  name: agent-secrets
+  namespace: ale
+type: Opaque
+---
+apiVersion: v1
+data:
   MONGODB_DATABASE: YWxl
   MONGODB_URL: bW9uZ29kYjovL21vbmdvOjI3MDE3L2FsZQ==
 kind: Secret
@@ -167,6 +176,30 @@ spec:
   selector:
     app: controller
     module: controller
+    service: ale
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: controller
+    module: controller-ops
+    service: ale
+  name: ale-controller-ops
+  namespace: ale
+spec:
+  clusterIP: None
+  ports:
+  - port: 9009
+    protocol: TCP
+    targetPort: 9009
+  selector:
+    app: controller
+    module: controller-ops
     service: ale
   sessionAffinity: ClientIP
   sessionAffinityConfig:
@@ -289,6 +322,16 @@ spec:
           value: "false"
         - name: LOG_LEVEL
           value: debug
+        - name: STAT_DB_URL
+          valueFrom:
+            secretKeyRef:
+              key: STAT_DB_URL
+              name: agent-secrets
+        - name: STAT_DB_NAME
+          valueFrom:
+            secretKeyRef:
+              key: STAT_DB_NAME
+              name: agent-secrets
         image: ghcr.io/ale-run/agent:dev
         imagePullPolicy: Always
         livenessProbe:
@@ -303,12 +346,39 @@ spec:
             port: 9800
         resources:
           requests:
-            cpu: 500m
-            memory: 512Mi
+            cpu: 20m
+            memory: 256Mi
         startupProbe:
           initialDelaySeconds: 5
           tcpSocket:
             port: 9800
+      - image: mongo:4.0
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          tcpSocket:
+            port: 27017
+        name: mongo
+        ports:
+        - containerPort: 27017
+          protocol: TCP
+        readinessProbe:
+          tcpSocket:
+            port: 27017
+        resources:
+          requests:
+            cpu: 20m
+            memory: 256Mi
+        securityContext:
+          allowPrivilegeEscalation: false
+          privileged: false
+        startupProbe:
+          initialDelaySeconds: 5
+          tcpSocket:
+            port: 27017
+        volumeMounts:
+        - mountPath: /data/db
+          name: stat-cache-volume
+          subPath: data
       serviceAccountName: sa-agent
       terminationGracePeriodSeconds: 5
       tolerations:
@@ -316,6 +386,10 @@ spec:
         operator: Exists
       - effect: NoSchedule
         operator: Exists
+      volumes:
+      - emptyDir:
+          sizeLimit: 1Gi
+        name: stat-cache-volume
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -432,13 +506,121 @@ spec:
             secretKeyRef:
               key: MONGODB_DATABASE
               name: ale-secrets
+        image: ghcr.io/ale-run/server:dev
+        imagePullPolicy: Always
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - sleep
+              - "5"
+        livenessProbe:
+          failureThreshold: 5
+          httpGet:
+            path: /
+            port: 9009
+            scheme: HTTP
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 180
+        name: server
+        ports:
+        - containerPort: 9009
+          protocol: TCP
+        readinessProbe:
+          failureThreshold: 5
+          httpGet:
+            path: /
+            port: 9009
+            scheme: HTTP
+          initialDelaySeconds: 20
+          periodSeconds: 5
+          successThreshold: 1
+          timeoutSeconds: 180
+        resources:
+          limits:
+            cpu: "2"
+            memory: 2Gi
+          requests:
+            cpu: 10m
+            memory: 128Mi
+      enableServiceLinks: false
+      restartPolicy: Always
+      serviceAccountName: sa-controller
+      terminationGracePeriodSeconds: 20
+      tolerations:
+      - effect: NoExecute
+        operator: Exists
+      - effect: NoSchedule
+        operator: Exists
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: controller
+    module: controller-ops
+    service: ale
+  name: ale-controller-ops
+  namespace: ale
+spec:
+  minReadySeconds: 10
+  replicas: 1
+  selector:
+    matchLabels:
+      app: controller
+      module: controller-ops
+      service: ale
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: controller
+        module: controller-ops
+        service: ale
+    spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - preference:
+              matchExpressions:
+              - key: purpose
+                operator: In
+                values:
+                - system
+            weight: 1
+      containers:
+      - env:
+        - name: NODE_ENV
+          value: production
+        - name: LOG_TIMESTAMPS
+          value: "false"
+        - name: LOG_LEVEL
+          value: debug
+        - name: DB_URL
+          valueFrom:
+            secretKeyRef:
+              key: MONGODB_URL
+              name: ale-secrets
+        - name: DB_DATABASE
+          valueFrom:
+            secretKeyRef:
+              key: MONGODB_DATABASE
+              name: ale-secrets
         - name: AGENT_ENDPOINT
-          value: https://agent.ale.svc:9801
+          value: https://ale-agent.ale.svc:9801
         - name: AGENT_TOKEN
           valueFrom:
             secretKeyRef:
               key: AGENT_TOKEN
-              name: ale-secrets
+              name: agent-secrets
+        - name: MODE_OPS
+          value: "true"
         image: ghcr.io/ale-run/server:dev
         imagePullPolicy: Always
         lifecycle:
@@ -688,7 +870,7 @@ spec:
                 - system
             weight: 1
       containers:
-      - image: mongo:5.0
+      - image: mongo:4.0
         imagePullPolicy: IfNotPresent
         name: mongo
         ports:
@@ -743,31 +925,3 @@ spec:
     apiVersion: apps/v1
     kind: Deployment
     name: server
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: ale-np-ingress
-  namespace: ale
-spec:
-  podSelector: {}
-  policyTypes:
-  - Ingress
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: ale-np-namespace
-  namespace: ale
-spec:
-  ingress:
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          app.kubernetes.io/name: ingress-nginx
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: ingress-nginx
-  podSelector: {}
-  policyTypes:
-  - Ingress
